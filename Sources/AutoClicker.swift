@@ -161,6 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var isRecordingPath = false
     var heldKeys: Set<UInt16> = []
     var lastMoveTime: TimeInterval = 0
+    var eventTap: CFMachPort?
+    var tapRunLoopSource: CFRunLoopSource?
 
     // Replay
     nonisolated(unsafe) var replayCancelled = false
@@ -606,23 +608,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: - Monitors
 
     func installMonitors() {
-        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            DispatchQueue.main.async {
-                guard let self, self.isRecordingPath else { return }
-                self.captureMove(event)
-            }
-        }
-        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
+        // Local monitor is only for capturing a new hotkey combo typed into our popover.
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             return MainActor.assumeIsolated {
                 if self.recordingTarget != nil {
                     if event.type == .keyDown { self.handleHotkeyRecording(event) }
                     return nil
                 }
-                if self.isRecordingPath, event.type != .flagsChanged { self.captureMove(event) }
                 return event
             }
         }
+    }
+
+    // MARK: - Global key capture (CGEvent tap — works even when our app is in the background)
+
+    func startEventTap() -> Bool {
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true); return true }
+        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(mask),
+            callback: { _, type, event, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    MainActor.assumeIsolated {
+                        if let t = delegate.eventTap { CGEvent.tapEnable(tap: t, enable: true) }
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                if type == .keyDown || type == .keyUp {
+                    let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+                    let isDown = (type == .keyDown)
+                    DispatchQueue.main.async { delegate.captureMove(keyCode: keyCode, isDown: isDown) }
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: selfPtr
+        ) else { return false }
+        eventTap = tap
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        tapRunLoopSource = src
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    func stopEventTap() {
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
     }
 
     // MARK: - Movement recording
@@ -634,10 +671,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             for k in heldKeys { moves.append(MoveEvent(keyCode: k, isDown: false, delay: 0)) }
             heldKeys.removeAll()
             isRecordingPath = false
+            stopEventTap()
             rebuildPath()
             saveSettings()
         } else {
-            guard AXIsProcessTrusted() else { promptForAccessibilityIfNeeded(); refreshUI(); return }
+            guard AXIsProcessTrusted(), startEventTap() else {
+                promptForAccessibilityIfNeeded(); refreshUI(); return
+            }
             moves = []
             heldKeys.removeAll()
             isRecordingPath = true
@@ -646,18 +686,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         refreshUI()
     }
 
-    func captureMove(_ event: NSEvent) {
-        guard wasdKeys.contains(event.keyCode) else { return }
-        let isDown = event.type == .keyDown
+    func captureMove(keyCode: UInt16, isDown: Bool) {
+        guard isRecordingPath, wasdKeys.contains(keyCode) else { return }
         // Ignore auto-repeat keyDowns for a key already held
-        if isDown && heldKeys.contains(event.keyCode) { return }
-        if !isDown && !heldKeys.contains(event.keyCode) { return }
+        if isDown && heldKeys.contains(keyCode) { return }
+        if !isDown && !heldKeys.contains(keyCode) { return }
 
-        let now = event.timestamp
+        let now = ProcessInfo.processInfo.systemUptime
         let delay = moves.isEmpty ? 0 : min(max(now - lastMoveTime, 0), 5)
         lastMoveTime = now
-        moves.append(MoveEvent(keyCode: event.keyCode, isDown: isDown, delay: delay))
-        if isDown { heldKeys.insert(event.keyCode) } else { heldKeys.remove(event.keyCode) }
+        moves.append(MoveEvent(keyCode: keyCode, isDown: isDown, delay: delay))
+        if isDown { heldKeys.insert(keyCode) } else { heldKeys.remove(keyCode) }
         rebuildPath()
         if popover.isShown { refreshUI() }
     }
