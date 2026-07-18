@@ -1,4 +1,5 @@
 import Cocoa
+import Carbon.HIToolbox
 
 // MARK: - Theme
 
@@ -66,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Hotkey (default: Command + D)
     var hotKeyCode: UInt16 = 2
     var hotKeyMods: NSEvent.ModifierFlags = [.command]
+    var hotKeyRef: EventHotKeyRef?
     var isRecording = false
 
     var cps: Double { cpsSteps[cpsIndex] }
@@ -76,7 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         loadSettings()
         buildStatusItem()
         buildPopover()
-        installHotkeyMonitors()
+        installRecordingMonitor()
+        installHotkeyHandler()
+        registerHotkey()
         promptForAccessibilityIfNeeded()
     }
 
@@ -419,24 +423,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    // MARK: - Key monitors
+    // MARK: - Global hotkey (Carbon RegisterEventHotKey — works system-wide, no permission needed)
 
-    func installHotkeyMonitors() {
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            DispatchQueue.main.async {
-                guard let self, !self.isRecording else { return }
-                if self.matchesHotkey(event) { self.toggleClicked() }
-            }
+    func carbonModifiers(_ flags: NSEvent.ModifierFlags) -> UInt32 {
+        var m: UInt32 = 0
+        if flags.contains(.command) { m |= UInt32(cmdKey) }
+        if flags.contains(.option) { m |= UInt32(optionKey) }
+        if flags.contains(.control) { m |= UInt32(controlKey) }
+        if flags.contains(.shift) { m |= UInt32(shiftKey) }
+        return m
+    }
+
+    func registerHotkey() {
+        if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+            hotKeyRef = nil
         }
+        let hotKeyID = EventHotKeyID(signature: OSType(0x41434C4B), id: 1) // 'ACLK'
+        RegisterEventHotKey(UInt32(hotKeyCode), carbonModifiers(hotKeyMods), hotKeyID,
+                            GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
+
+    func installHotkeyHandler() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData else { return noErr }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            MainActor.assumeIsolated {
+                delegate.hotkeyPressed()
+            }
+            return noErr
+        }, 1, &eventType, selfPtr, nil)
+    }
+
+    func hotkeyPressed() {
+        if isRecording {
+            // Pressing the current combo while recording keeps it and just ends recording
+            isRecording = false
+            refreshUI()
+            return
+        }
+        toggleClicked()
+    }
+
+    // Local monitor only captures keystrokes while recording a new shortcut
+    func installRecordingMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return MainActor.assumeIsolated {
                 if self.isRecording {
                     self.handleRecording(event)
-                    return nil
-                }
-                if self.matchesHotkey(event) {
-                    self.toggleClicked()
                     return nil
                 }
                 return event
@@ -460,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         hotKeyMods = mods
         isRecording = false
         saveSettings()
+        registerHotkey()
         refreshUI()
     }
 
