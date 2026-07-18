@@ -16,7 +16,7 @@ A tiny native macOS menu bar autoclicker. No dependencies, ~100 KB, written in a
 
 ## Install
 
-Download `AutoClicker.app.zip` from the [latest release](../../releases/latest), unzip, and move `AutoClicker.app` wherever you like (e.g. `/Applications`).
+Download `AutoClicker.dmg` from the [latest release](../../releases/latest), open it, and drag **AutoClicker** into the **Applications** folder. (A plain `AutoClicker.app.zip` is also attached if you prefer.)
 
 Because the app is not notarized, macOS may block the first launch — right-click the app and choose **Open** once.
 
