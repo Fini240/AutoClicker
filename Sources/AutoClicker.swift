@@ -714,7 +714,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if type == .keyDown || type == .keyUp {
                     let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
                     let isDown = (type == .keyDown)
-                    DispatchQueue.main.async { delegate.captureMove(keyCode: keyCode, isDown: isDown) }
+                    let time = Double(event.timestamp) / 1_000_000_000 // hardware timestamp, ns → s
+                    DispatchQueue.main.async { delegate.captureMove(keyCode: keyCode, isDown: isDown, at: time) }
                 }
                 return Unmanaged.passUnretained(event)
             },
@@ -756,15 +757,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         refreshUI()
     }
 
-    func captureMove(keyCode: UInt16, isDown: Bool) {
+    func captureMove(keyCode: UInt16, isDown: Bool, at time: TimeInterval) {
         guard isRecordingPath, wasdKeys.contains(keyCode) else { return }
         // Ignore auto-repeat keyDowns for a key already held
         if isDown && heldKeys.contains(keyCode) { return }
         if !isDown && !heldKeys.contains(keyCode) { return }
 
-        let now = ProcessInfo.processInfo.systemUptime
-        let delay = moves.isEmpty ? 0 : min(max(now - lastMoveTime, 0), 5)
-        lastMoveTime = now
+        let delay = moves.isEmpty ? 0 : min(max(time - lastMoveTime, 0), 5)
+        lastMoveTime = time
         moves.append(MoveEvent(keyCode: keyCode, isDown: isDown, delay: delay))
         if isDown { heldKeys.insert(keyCode) } else { heldKeys.remove(keyCode) }
         rebuildPath()
@@ -797,10 +797,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let src = CGEventSource(stateID: .hidSystemState)
+            // Schedule against one absolute timeline: each sleep targets start + cumulative
+            // delay, so per-sleep overshoot can't accumulate and shift later events.
+            let start = ProcessInfo.processInfo.systemUptime
+            var due = 0.0
             for ev in events {
                 if self.cancelled() { break }
-                if ev.delay > 0 { usleep(useconds_t(ev.delay * 1_000_000)) }
-                CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)?.post(tap: .cghidEventTap)
+                due += ev.delay
+                let remaining = start + due - ProcessInfo.processInfo.systemUptime
+                if remaining > 0 { usleep(useconds_t(remaining * 1_000_000)) }
+                let e = CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)
+                e?.flags = [] // don't inherit the still-held replay hotkey modifiers (e.g. ⌘)
+                e?.post(tap: .cghidEventTap)
             }
             // Safety: make sure no WASD key is left pressed
             for k in wasdKeys {
