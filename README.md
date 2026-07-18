@@ -12,11 +12,12 @@ A tiny native macOS menu bar autoclicker. No dependencies, ~100 KB, written in a
   - Mint **Start / Stop** button
 - Customizable global hotkey to start/stop from anywhere (default **⌘D**) — click the shortcut pill in the popover and press a new combo
 - Clicks wherever your cursor currently is
-- **Keyboard macros** — record a sequence of key presses with their real timing (which keys, how long each is held) and replay it:
-  - **Record keys** hotkey (default **⌘R**) starts/stops recording
-  - **Play sequence** hotkey (default **⌘P**) replays the recording
-  - Both hotkeys are rebindable, and the macro is saved across restarts
-- Menu bar icon turns green while clicking or playing, red while recording
+- **WASD movement map** — record your W/A/S/D key presses with their real timing, see the resulting path drawn as a live 2D map, then replay the exact movement:
+  - **Record path** hotkey (default **⌘R**) starts/stops recording; the map updates live as you move
+  - **Replay path** hotkey (default **⌘P**) replays the movement with the original timing and hold durations
+  - Green dot marks the start of the path, red dot the end
+  - Both hotkeys are rebindable, and the recorded path is saved across restarts
+- Menu bar icon turns green while clicking or replaying, red while recording
 
 ## Install
 
@@ -49,12 +50,14 @@ open build/AutoClicker.app
 3. Press **Start clicking** (or the hotkey, default **⌘D**), then point your cursor where you want the clicks
 4. Press the hotkey again to stop
 
-### Keyboard macros
+### WASD movement map
 
-1. Press the **Record keys** hotkey (default **⌘R**) — the menu bar icon turns red
-2. Perform the key presses you want to capture (timing and hold duration are recorded)
+1. Press the **Record path** hotkey (default **⌘R**) — the menu bar icon turns red
+2. Move with **W / A / S / D**; the map in the popover draws your path in real time (W = up, S = down, A = left, D = right), and hold duration determines distance
 3. Press **⌘R** again to stop
-4. Press the **Play sequence** hotkey (default **⌘P**) to replay it; press it again to stop playback early
+4. Press the **Replay path** hotkey (default **⌘P**) to replay the movement; press it again to stop early
+
+The path is a visualization of the recorded key timing — replay re-sends the same W/A/S/D key presses, so it works in any app or game that reads those keys.
 
 ## License
 

@@ -13,7 +13,9 @@ enum Theme {
     static let mintDark      = NSColor(srgbRed: 0.05, green: 0.20, blue: 0.15, alpha: 1)
     static let red           = NSColor(srgbRed: 0.95, green: 0.66, blue: 0.63, alpha: 1)
     static let redDark       = NSColor(srgbRed: 0.25, green: 0.07, blue: 0.05, alpha: 1)
+    static let green         = NSColor(srgbRed: 0.45, green: 0.85, blue: 0.55, alpha: 1)
     static let separator     = NSColor(calibratedWhite: 1, alpha: 0.08)
+    static let grid          = NSColor(calibratedWhite: 1, alpha: 0.05)
     static let textPrimary   = NSColor.white
     static let textSecondary = NSColor(calibratedWhite: 0.62, alpha: 1)
 }
@@ -22,52 +24,107 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
-// MARK: - Key names
+// MARK: - Key names / codes
 
 let keyNames: [UInt16: String] = [
     0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
     11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T", 31: "O", 32: "U",
     34: "I", 35: "P", 37: "L", 38: "J", 40: "K", 45: "N", 46: "M",
     18: "1", 19: "2", 20: "3", 21: "4", 22: "5", 23: "6", 25: "9", 26: "7", 28: "8", 29: "0",
-    27: "-", 24: "=", 33: "[", 30: "]", 41: ";", 39: "'", 43: ",", 47: ".", 44: "/", 50: "`", 42: "\\",
     49: "Space", 48: "Tab", 36: "↩", 51: "⌫", 53: "Esc",
     122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8",
-    101: "F9", 109: "F10", 103: "F11", 111: "F12", 105: "F13", 107: "F14", 113: "F15",
+    101: "F9", 109: "F10", 103: "F11", 111: "F12",
     123: "←", 124: "→", 125: "↓", 126: "↑",
 ]
 
-let fKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+let fKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 
-func isModifierKeyCode(_ k: UInt16) -> Bool {
-    [54, 55, 56, 60, 58, 61, 59, 62, 57, 63].contains(k)
-}
+let keyW: UInt16 = 13, keyA: UInt16 = 0, keyS: UInt16 = 1, keyD: UInt16 = 2
+let wasdKeys: Set<UInt16> = [keyW, keyA, keyS, keyD]
 
-func cgFlag(forKeyCode k: UInt16) -> CGEventFlags {
-    switch k {
-    case 54, 55: return .maskCommand
-    case 56, 60: return .maskShift
-    case 58, 61: return .maskAlternate
-    case 59, 62: return .maskControl
-    case 57:     return .maskAlphaShift
-    default:     return []
-    }
-}
+// MARK: - Model
 
-// MARK: - Macro model
-
-struct MacroEvent: Codable {
+struct MoveEvent: Codable {
     var keyCode: UInt16
     var isDown: Bool
-    var isModifier: Bool
-    var delay: Double // seconds to wait before firing this event
+    var delay: Double // seconds since previous event
 }
 
 struct Hotkey: Codable {
     var code: UInt16
-    var mods: UInt // NSEvent.ModifierFlags rawValue
+    var mods: UInt
 }
 
 enum HotkeyTarget { case click, record, play }
+
+// MARK: - Path map view
+
+final class PathMapView: NSView {
+    var points: [CGPoint] = [] { didSet { needsDisplay = true } }
+    var recording = false
+    override var isFlipped: Bool { true } // y grows downward: matches S = down
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bg = NSBezierPath(roundedRect: bounds, xRadius: 14, yRadius: 14)
+        Theme.card.setFill()
+        bg.fill()
+
+        // Faint grid
+        Theme.grid.setStroke()
+        let step: CGFloat = 26
+        let grid = NSBezierPath()
+        grid.lineWidth = 1
+        var gx: CGFloat = step
+        while gx < bounds.width { grid.move(to: CGPoint(x: gx, y: 6)); grid.line(to: CGPoint(x: gx, y: bounds.height - 6)); gx += step }
+        var gy: CGFloat = step
+        while gy < bounds.height { grid.move(to: CGPoint(x: 6, y: gy)); grid.line(to: CGPoint(x: bounds.width - 6, y: gy)); gy += step }
+        grid.stroke()
+
+        guard points.count > 1 else {
+            let msg = recording ? "Move with W A S D…" : "Press Record, then move with W A S D"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: Theme.textSecondary,
+            ]
+            let size = (msg as NSString).size(withAttributes: attrs)
+            (msg as NSString).draw(at: CGPoint(x: (bounds.width - size.width) / 2,
+                                               y: (bounds.height - size.height) / 2), withAttributes: attrs)
+            return
+        }
+
+        // Fit path into view with padding
+        let pad: CGFloat = 18
+        let xs = points.map { $0.x }, ys = points.map { $0.y }
+        let minX = xs.min()!, maxX = xs.max()!, minY = ys.min()!, maxY = ys.max()!
+        let spanX = max(maxX - minX, 1), spanY = max(maxY - minY, 1)
+        let drawW = bounds.width - 2 * pad, drawH = bounds.height - 2 * pad
+        let scale = min(drawW / spanX, drawH / spanY)
+        let offX = pad + (drawW - spanX * scale) / 2
+        let offY = pad + (drawH - spanY * scale) / 2
+        func map(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: offX + (p.x - minX) * scale, y: offY + (p.y - minY) * scale)
+        }
+
+        let line = NSBezierPath()
+        line.lineWidth = 2.5
+        line.lineJoinStyle = .round
+        line.lineCapStyle = .round
+        line.move(to: map(points[0]))
+        for p in points.dropFirst() { line.line(to: map(p)) }
+        Theme.mint.setStroke()
+        line.stroke()
+
+        // Start (green) and end (red) markers
+        func dot(_ p: CGPoint, _ color: NSColor) {
+            let r: CGFloat = 4.5
+            let c = map(p)
+            let path = NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+            color.setFill(); path.fill()
+        }
+        dot(points.first!, Theme.green)
+        dot(points.last!, Theme.red)
+    }
+}
 
 // MARK: - App delegate
 
@@ -76,14 +133,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
 
-    // Live controls
     var leftSegment, rightSegment: NSButton!
     var cpsNumber, intervalCaption, clicksNumber: NSTextField!
     var startContainer: NSView!
     var startLabel, badgeLabel: NSTextField!
     var clickPill, recordPill, playPill: NSButton!
-    var macroStatus: NSTextField!
-    var clearButton: NSButton!
+    var mapView: PathMapView!
+    var pathStatus: NSTextField!
     var statusDot, statusText: NSTextField!
 
     // Clicking
@@ -98,19 +154,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var recordHK = Hotkey(code: 15, mods: NSEvent.ModifierFlags.command.rawValue)
     var playHK   = Hotkey(code: 35, mods: NSEvent.ModifierFlags.command.rawValue)
     var clickRef, recordRef, playRef: EventHotKeyRef?
+    var recordingTarget: HotkeyTarget?
 
-    var recordingTarget: HotkeyTarget? // which pill is capturing a new combo
+    // Movement recording
+    var moves: [MoveEvent] = []
+    var isRecordingPath = false
+    var heldKeys: Set<UInt16> = []
+    var lastMoveTime: TimeInterval = 0
 
-    // Macro
-    var macroEvents: [MacroEvent] = []
-    var isCapturingMacro = false
-    var macroArmed = false
-    var macroLastTime: TimeInterval = 0
-
-    // Playback (touched from background thread — guarded by lock)
-    nonisolated(unsafe) var playbackCancelled = false
-    let playbackLock = NSLock()
-    var isPlaying = false
+    // Replay
+    nonisolated(unsafe) var replayCancelled = false
+    let replayLock = NSLock()
+    var isReplaying = false
 
     var cps: Double { cpsSteps[cpsIndex] }
     var intervalMs: Double { 1000.0 / cps }
@@ -126,9 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         promptForAccessibilityIfNeeded()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        stopTimer()
-    }
+    func applicationWillTerminate(_ notification: Notification) { stopTimer() }
 
     // MARK: - Settings
 
@@ -146,9 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             cpsIndex = min(max(d.integer(forKey: "cpsIndex"), 0), cpsSteps.count - 1)
         }
         useRightButton = d.bool(forKey: "useRightButton")
-        if let data = d.data(forKey: "macro"),
-           let m = try? JSONDecoder().decode([MacroEvent].self, from: data) {
-            macroEvents = m
+        if let data = d.data(forKey: "moves"),
+           let m = try? JSONDecoder().decode([MoveEvent].self, from: data) {
+            moves = m
         }
     }
 
@@ -159,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         d.set(try? JSONEncoder().encode(playHK), forKey: "playHK")
         d.set(cpsIndex, forKey: "cpsIndex")
         d.set(useRightButton, forKey: "useRightButton")
-        d.set(try? JSONEncoder().encode(macroEvents), forKey: "macro")
+        d.set(try? JSONEncoder().encode(moves), forKey: "moves")
     }
 
     // MARK: - Hotkey helpers
@@ -190,11 +243,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func registerHotkeys() {
-        for ref in [clickRef, recordRef, playRef] where ref != nil {
-            UnregisterEventHotKey(ref!)
-        }
+        for ref in [clickRef, recordRef, playRef] where ref != nil { UnregisterEventHotKey(ref!) }
         clickRef = nil; recordRef = nil; playRef = nil
-        let sig = OSType(0x41434C4B) // 'ACLK'
+        let sig = OSType(0x41434C4B)
         func reg(_ hk: Hotkey, _ id: UInt32, _ out: inout EventHotKeyRef?) {
             RegisterEventHotKey(UInt32(hk.code), carbonMods(hk.mods),
                                 EventHotKeyID(signature: sig, id: id),
@@ -206,8 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func installHotkeyHandler() {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: UInt32(kEventHotKeyPressed))
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, userData in
             guard let userData else { return noErr }
@@ -223,11 +273,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func hotkeyFired(id: UInt32) {
-        guard recordingTarget == nil else { return } // don't fire while rebinding
+        guard recordingTarget == nil else { return }
         switch id {
         case 1: toggleClicked()
-        case 2: toggleMacroRecording()
-        case 3: togglePlay()
+        case 2: toggleRecording()
+        case 3: toggleReplay()
         default: break
         }
     }
@@ -236,8 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "cursorarrow.click",
-                                           accessibilityDescription: "AutoClicker")
+        statusItem.button?.image = NSImage(systemSymbolName: "cursorarrow.click", accessibilityDescription: "AutoClicker")
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover)
     }
@@ -254,9 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        recordingTarget = nil
-    }
+    func popoverDidClose(_ notification: Notification) { recordingTarget = nil }
 
     // MARK: - UI builders
 
@@ -264,9 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                    color: NSColor, frame: NSRect, align: NSTextAlignment = .center) -> NSTextField {
         let l = NSTextField(labelWithString: text)
         l.font = .systemFont(ofSize: size, weight: weight)
-        l.textColor = color
-        l.alignment = align
-        l.frame = frame
+        l.textColor = color; l.alignment = align; l.frame = frame
         return l
     }
 
@@ -281,22 +326,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func makeFlatButton(_ title: String, size: CGFloat, frame: NSRect, action: Selector) -> NSButton {
         let b = NSButton(frame: frame)
-        b.isBordered = false
-        b.wantsLayer = true
-        b.target = self
-        b.action = action
+        b.isBordered = false; b.wantsLayer = true; b.target = self; b.action = action
         setTitle(b, title, size: size, color: Theme.textSecondary)
         return b
     }
 
-    func setTitle(_ b: NSButton, _ title: String, size: CGFloat, color: NSColor,
-                  weight: NSFont.Weight = .semibold) {
-        let p = NSMutableParagraphStyle()
-        p.alignment = .center
+    func setTitle(_ b: NSButton, _ title: String, size: CGFloat, color: NSColor, weight: NSFont.Weight = .semibold) {
+        let p = NSMutableParagraphStyle(); p.alignment = .center
         b.attributedTitle = NSAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: size, weight: weight),
-            .foregroundColor: color,
-            .paragraphStyle: p,
+            .foregroundColor: color, .paragraphStyle: p,
         ])
     }
 
@@ -311,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func buildPopover() {
         let width: CGFloat = 300
-        let height: CGFloat = 476
+        let height: CGFloat = 628
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         root.wantsLayer = true
         root.layer?.backgroundColor = Theme.background.cgColor
@@ -323,42 +362,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         seg.layer?.backgroundColor = Theme.card.cgColor
         seg.layer?.cornerRadius = 12
         root.addSubview(seg)
-        leftSegment = makeFlatButton("Left", size: 15, frame: NSRect(x: 3, y: 3, width: 131, height: 32),
-                                     action: #selector(pickLeft))
+        leftSegment = makeFlatButton("Left", size: 15, frame: NSRect(x: 3, y: 3, width: 131, height: 32), action: #selector(pickLeft))
         leftSegment.layer?.cornerRadius = 9
-        rightSegment = makeFlatButton("Right", size: 15, frame: NSRect(x: 134, y: 3, width: 131, height: 32),
-                                      action: #selector(pickRight))
+        rightSegment = makeFlatButton("Right", size: 15, frame: NSRect(x: 134, y: 3, width: 131, height: 32), action: #selector(pickRight))
         rightSegment.layer?.cornerRadius = 9
-        seg.addSubview(leftSegment)
-        seg.addSubview(rightSegment)
+        seg.addSubview(leftSegment); seg.addSubview(rightSegment)
 
-        // Speed card
+        // Speed + clicks cards
         let speedCard = makeCard(frame: NSRect(x: 16, y: 66, width: 128, height: 112), in: root)
-        speedCard.addSubview(makeLabel("Clicks / sec", size: 12, weight: .medium, color: Theme.textSecondary,
-                                       frame: NSRect(x: 0, y: 12, width: 128, height: 16)))
-        cpsNumber = makeLabel("10", size: 34, weight: .bold, color: Theme.textPrimary,
-                              frame: NSRect(x: 24, y: 34, width: 80, height: 42))
+        speedCard.addSubview(makeLabel("Clicks / sec", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 0, y: 12, width: 128, height: 16)))
+        cpsNumber = makeLabel("10", size: 34, weight: .bold, color: Theme.textPrimary, frame: NSRect(x: 24, y: 34, width: 80, height: 42))
         speedCard.addSubview(cpsNumber)
-        intervalCaption = makeLabel("100 ms", size: 11, weight: .regular, color: Theme.textSecondary,
-                                    frame: NSRect(x: 0, y: 82, width: 128, height: 14))
+        intervalCaption = makeLabel("100 ms", size: 11, weight: .regular, color: Theme.textSecondary, frame: NSRect(x: 0, y: 82, width: 128, height: 14))
         speedCard.addSubview(intervalCaption)
-        let minus = makeFlatButton("−", size: 15, frame: NSRect(x: 8, y: 44, width: 24, height: 24),
-                                   action: #selector(slower))
-        minus.layer?.backgroundColor = Theme.control.cgColor
-        minus.layer?.cornerRadius = 12
+        let minus = makeFlatButton("−", size: 15, frame: NSRect(x: 8, y: 44, width: 24, height: 24), action: #selector(slower))
+        minus.layer?.backgroundColor = Theme.control.cgColor; minus.layer?.cornerRadius = 12
         speedCard.addSubview(minus)
-        let plus = makeFlatButton("+", size: 15, frame: NSRect(x: 96, y: 44, width: 24, height: 24),
-                                  action: #selector(faster))
-        plus.layer?.backgroundColor = Theme.control.cgColor
-        plus.layer?.cornerRadius = 12
+        let plus = makeFlatButton("+", size: 15, frame: NSRect(x: 96, y: 44, width: 24, height: 24), action: #selector(faster))
+        plus.layer?.backgroundColor = Theme.control.cgColor; plus.layer?.cornerRadius = 12
         speedCard.addSubview(plus)
 
-        // Clicks card
         let clicksCard = makeCard(frame: NSRect(x: 156, y: 66, width: 128, height: 112), in: root)
-        clicksCard.addSubview(makeLabel("Clicks", size: 12, weight: .medium, color: Theme.textSecondary,
-                                        frame: NSRect(x: 0, y: 12, width: 128, height: 16)))
-        clicksNumber = makeLabel("0", size: 34, weight: .bold, color: Theme.textSecondary,
-                                 frame: NSRect(x: 4, y: 34, width: 120, height: 42))
+        clicksCard.addSubview(makeLabel("Clicks", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 0, y: 12, width: 128, height: 16)))
+        clicksNumber = makeLabel("0", size: 34, weight: .bold, color: Theme.textSecondary, frame: NSRect(x: 4, y: 34, width: 120, height: 42))
         clicksCard.addSubview(clicksNumber)
 
         // Start / stop bar
@@ -367,11 +393,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         startContainer.layer?.backgroundColor = Theme.mint.cgColor
         startContainer.layer?.cornerRadius = 14
         root.addSubview(startContainer)
-        startLabel = makeLabel("Start clicking", size: 17, weight: .bold, color: Theme.mintDark,
-                               frame: NSRect(x: 0, y: 14, width: 268, height: 22))
+        startLabel = makeLabel("Start clicking", size: 17, weight: .bold, color: Theme.mintDark, frame: NSRect(x: 0, y: 14, width: 268, height: 22))
         startContainer.addSubview(startLabel)
-        badgeLabel = makeLabel("⌘D", size: 12, weight: .bold, color: Theme.mintDark,
-                               frame: NSRect(x: 218, y: 13, width: 38, height: 22))
+        badgeLabel = makeLabel("⌘D", size: 12, weight: .bold, color: Theme.mintDark, frame: NSRect(x: 218, y: 13, width: 38, height: 22))
         badgeLabel.wantsLayer = true
         badgeLabel.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.14).cgColor
         badgeLabel.layer?.cornerRadius = 6
@@ -379,53 +403,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         startContainer.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(toggleClicked)))
 
         // Click hotkey row
-        root.addSubview(makeLabel("Click on / off", size: 12, weight: .medium, color: Theme.textSecondary,
-                                  frame: NSRect(x: 16, y: 254, width: 140, height: 16), align: .left))
+        root.addSubview(makeLabel("Click on / off", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 254, width: 140, height: 16), align: .left))
         clickPill = makePill(NSRect(x: 164, y: 248, width: 120, height: 28), action: #selector(recordClickHK))
         root.addSubview(clickPill)
 
-        // Separator + macro heading
-        let sep = NSView(frame: NSRect(x: 16, y: 288, width: 268, height: 1))
-        sep.wantsLayer = true
-        sep.layer?.backgroundColor = Theme.separator.cgColor
+        // Separator + heading
+        let sep = NSView(frame: NSRect(x: 16, y: 290, width: 268, height: 1))
+        sep.wantsLayer = true; sep.layer?.backgroundColor = Theme.separator.cgColor
         root.addSubview(sep)
-        root.addSubview(makeLabel("KEYBOARD MACRO", size: 11, weight: .bold, color: Theme.textSecondary,
-                                  frame: NSRect(x: 16, y: 300, width: 200, height: 14), align: .left))
+        root.addSubview(makeLabel("WASD MOVEMENT MAP", size: 11, weight: .bold, color: Theme.textSecondary, frame: NSRect(x: 16, y: 302, width: 220, height: 14), align: .left))
 
-        // Record row
-        root.addSubview(makeLabel("Record keys", size: 12, weight: .medium, color: Theme.textSecondary,
-                                  frame: NSRect(x: 16, y: 328, width: 140, height: 16), align: .left))
-        recordPill = makePill(NSRect(x: 164, y: 322, width: 120, height: 28), action: #selector(recordRecordHK))
+        // Map canvas
+        mapView = PathMapView(frame: NSRect(x: 16, y: 324, width: 268, height: 172))
+        mapView.wantsLayer = true
+        root.addSubview(mapView)
+
+        // Record + play rows
+        root.addSubview(makeLabel("Record path", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 510, width: 140, height: 16), align: .left))
+        recordPill = makePill(NSRect(x: 164, y: 504, width: 120, height: 28), action: #selector(recordRecordHK))
         root.addSubview(recordPill)
-
-        // Play row
-        root.addSubview(makeLabel("Play sequence", size: 12, weight: .medium, color: Theme.textSecondary,
-                                  frame: NSRect(x: 16, y: 362, width: 140, height: 16), align: .left))
-        playPill = makePill(NSRect(x: 164, y: 356, width: 120, height: 28), action: #selector(recordPlayHK))
+        root.addSubview(makeLabel("Replay path", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 544, width: 140, height: 16), align: .left))
+        playPill = makePill(NSRect(x: 164, y: 538, width: 120, height: 28), action: #selector(recordPlayHK))
         root.addSubview(playPill)
 
-        // Macro status + clear
-        macroStatus = makeLabel("No macro recorded", size: 12, weight: .medium, color: Theme.textSecondary,
-                                frame: NSRect(x: 16, y: 396, width: 190, height: 16), align: .left)
-        root.addSubview(macroStatus)
-        clearButton = makeFlatButton("Clear", size: 12, frame: NSRect(x: 224, y: 390, width: 60, height: 28),
-                                     action: #selector(clearMacro))
-        clearButton.layer?.backgroundColor = Theme.card.cgColor
-        clearButton.layer?.cornerRadius = 9
-        root.addSubview(clearButton)
-
-        // Bottom status + quit
-        statusDot = makeLabel("●", size: 11, weight: .bold, color: Theme.textSecondary,
-                              frame: NSRect(x: 16, y: 440, width: 14, height: 16), align: .left)
-        root.addSubview(statusDot)
-        statusText = makeLabel("Idle", size: 12, weight: .medium, color: Theme.textSecondary,
-                               frame: NSRect(x: 32, y: 439, width: 160, height: 16), align: .left)
-        root.addSubview(statusText)
-        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 433, width: 60, height: 28),
-                                  action: #selector(quitApp))
-        quit.layer?.backgroundColor = Theme.card.cgColor
-        quit.layer?.cornerRadius = 9
+        // Status + clear + quit
+        pathStatus = makeLabel("No path recorded", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 578, width: 150, height: 16), align: .left)
+        root.addSubview(pathStatus)
+        let clear = makeFlatButton("Clear", size: 12, frame: NSRect(x: 160, y: 572, width: 56, height: 28), action: #selector(clearPath))
+        clear.layer?.backgroundColor = Theme.card.cgColor; clear.layer?.cornerRadius = 9
+        root.addSubview(clear)
+        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 572, width: 60, height: 28), action: #selector(quitApp))
+        quit.layer?.backgroundColor = Theme.card.cgColor; quit.layer?.cornerRadius = 9
         root.addSubview(quit)
+
+        statusDot = makeLabel("●", size: 10, weight: .bold, color: Theme.textSecondary, frame: NSRect(x: 16, y: 604, width: 12, height: 14), align: .left)
+        root.addSubview(statusDot)
+        statusText = makeLabel("Idle", size: 11, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 30, y: 603, width: 254, height: 14), align: .left)
+        root.addSubview(statusText)
 
         let vc = NSViewController()
         vc.view = root
@@ -435,6 +449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.appearance = NSAppearance(named: .darkAqua)
         popover.delegate = self
+
+        rebuildPath()
         refreshUI()
     }
 
@@ -474,25 +490,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pillTitle(recordPill, hk: recordHK, target: .record)
         pillTitle(playPill, hk: playHK, target: .play)
 
-        // Macro status
-        if isCapturingMacro {
-            macroStatus.stringValue = "● Recording…  \(macroEvents.count) events"
-            macroStatus.textColor = Theme.red
-        } else if isPlaying {
-            macroStatus.stringValue = "▶ Playing…"
-            macroStatus.textColor = Theme.mint
-        } else if macroEvents.isEmpty {
-            macroStatus.stringValue = "No macro recorded"
-            macroStatus.textColor = Theme.textSecondary
+        mapView.recording = isRecordingPath
+
+        // Path status
+        let presses = moves.filter { $0.isDown }.count
+        let duration = moves.reduce(0.0) { $0 + $1.delay }
+        if isRecordingPath {
+            pathStatus.stringValue = "● Recording…  \(presses) moves"
+            pathStatus.textColor = Theme.red
+        } else if isReplaying {
+            pathStatus.stringValue = "▶ Replaying…"
+            pathStatus.textColor = Theme.mint
+        } else if moves.isEmpty {
+            pathStatus.stringValue = "No path recorded"
+            pathStatus.textColor = Theme.textSecondary
         } else {
-            macroStatus.stringValue = "\(macroEvents.count) events recorded"
-            macroStatus.textColor = Theme.textPrimary
+            pathStatus.stringValue = String(format: "%.1fs · %d moves", duration, presses)
+            pathStatus.textColor = Theme.textPrimary
         }
 
         if !AXIsProcessTrusted() {
-            statusDot.textColor = .systemOrange
-            statusText.stringValue = "Needs Accessibility access"
-            statusText.textColor = .systemOrange
+            statusDot.textColor = .systemOrange; statusText.stringValue = "Needs Accessibility access"; statusText.textColor = .systemOrange
         } else if isRunning {
             statusDot.textColor = Theme.mint; statusText.stringValue = "Clicking…"; statusText.textColor = Theme.mint
         } else {
@@ -500,9 +518,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         statusItem.button?.image = NSImage(
-            systemSymbolName: (isRunning || isCapturingMacro || isPlaying) ? "cursorarrow.click.badge.clock" : "cursorarrow.click",
+            systemSymbolName: (isRunning || isRecordingPath || isReplaying) ? "cursorarrow.click.badge.clock" : "cursorarrow.click",
             accessibilityDescription: "AutoClicker")
-        statusItem.button?.contentTintColor = isCapturingMacro ? Theme.red : ((isRunning || isPlaying) ? Theme.mint : nil)
+        statusItem.button?.contentTintColor = isRecordingPath ? Theme.red : ((isRunning || isReplaying) ? Theme.mint : nil)
+    }
+
+    // MARK: - Path building
+
+    func rebuildPath() {
+        var pos = CGPoint.zero
+        var pts: [CGPoint] = [pos]
+        var held: Set<UInt16> = []
+        let speed = 100.0
+        for ev in moves {
+            let dt = ev.delay
+            if dt > 0 && !held.isEmpty {
+                var dx = 0.0, dy = 0.0
+                if held.contains(keyW) { dy -= 1 }
+                if held.contains(keyS) { dy += 1 }
+                if held.contains(keyA) { dx -= 1 }
+                if held.contains(keyD) { dx += 1 }
+                pos.x += dx * speed * dt
+                pos.y += dy * speed * dt
+                pts.append(pos)
+            }
+            if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
+        }
+        mapView.points = pts.count > 1 ? pts : []
     }
 
     // MARK: - Actions
@@ -512,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func slower() { if cpsIndex > 0 { cpsIndex -= 1 }; saveSettings(); restartIfRunning(); refreshUI() }
     @objc func faster() { if cpsIndex < cpsSteps.count - 1 { cpsIndex += 1 }; saveSettings(); restartIfRunning(); refreshUI() }
     @objc func quitApp() { NSApp.terminate(nil) }
-    @objc func clearMacro() { macroEvents = []; saveSettings(); refreshUI() }
+    @objc func clearPath() { moves = []; rebuildPath(); saveSettings(); refreshUI() }
 
     @objc func recordClickHK() { recordingTarget = (recordingTarget == .click) ? nil : .click; refreshUI() }
     @objc func recordRecordHK() { recordingTarget = (recordingTarget == .record) ? nil : .record; refreshUI() }
@@ -535,7 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func handleHotkeyRecording(_ event: NSEvent) {
         guard let target = recordingTarget else { return }
-        if event.keyCode == 53 { recordingTarget = nil; refreshUI(); return } // Esc cancels
+        if event.keyCode == 53 { recordingTarget = nil; refreshUI(); return }
         let mods = normalized(event.modifierFlags)
         guard fKeyCodes.contains(event.keyCode) || !mods.isEmpty else {
             if let pill = pill(for: target) { setTitle(pill, "Add ⌘/⌥/⌃/⇧…", size: 12, color: .systemOrange) }
@@ -561,17 +603,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    // MARK: - Event monitors
+    // MARK: - Monitors
 
     func installMonitors() {
-        // Global: capture macro keystrokes happening in other apps
-        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
+        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             DispatchQueue.main.async {
-                guard let self, self.isCapturingMacro else { return }
-                self.captureMacroEvent(event)
+                guard let self, self.isRecordingPath else { return }
+                self.captureMove(event)
             }
         }
-        // Local: rebinding combos + macro keystrokes typed into our own app
         NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             return MainActor.assumeIsolated {
@@ -579,107 +619,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     if event.type == .keyDown { self.handleHotkeyRecording(event) }
                     return nil
                 }
-                if self.isCapturingMacro { self.captureMacroEvent(event) }
+                if self.isRecordingPath, event.type != .flagsChanged { self.captureMove(event) }
                 return event
             }
         }
     }
 
-    // MARK: - Macro recording
+    // MARK: - Movement recording
 
-    func toggleMacroRecording() {
-        if isPlaying { return }
-        if isCapturingMacro {
-            isCapturingMacro = false
-            // Drop trailing modifier noise from the stop-combo (e.g. the ⌘ of ⌘R)
-            while let last = macroEvents.last, last.isModifier { macroEvents.removeLast() }
+    func toggleRecording() {
+        if isReplaying { return }
+        if isRecordingPath {
+            // Release any keys still held, so replay doesn't leave a key stuck down
+            for k in heldKeys { moves.append(MoveEvent(keyCode: k, isDown: false, delay: 0)) }
+            heldKeys.removeAll()
+            isRecordingPath = false
+            rebuildPath()
             saveSettings()
         } else {
             guard AXIsProcessTrusted() else { promptForAccessibilityIfNeeded(); refreshUI(); return }
-            macroEvents = []
-            isCapturingMacro = true
-            // If the record hotkey uses modifiers, wait until they're released before capturing,
-            // so the trigger combo itself isn't baked into the macro.
-            macroArmed = NSEvent.ModifierFlags(rawValue: recordHK.mods).isEmpty
+            moves = []
+            heldKeys.removeAll()
+            isRecordingPath = true
+            rebuildPath()
         }
         refreshUI()
     }
 
-    func captureMacroEvent(_ event: NSEvent) {
-        let mods = normalized(event.modifierFlags)
-        if !macroArmed {
-            if event.type == .flagsChanged && mods.isEmpty { macroArmed = true }
-            return
-        }
-        var isDown: Bool
-        var isMod = false
-        switch event.type {
-        case .keyDown: isDown = true
-        case .keyUp: isDown = false
-        case .flagsChanged:
-            isMod = true
-            isDown = event.modifierFlags.contains(flagFor(event.keyCode))
-        default: return
-        }
+    func captureMove(_ event: NSEvent) {
+        guard wasdKeys.contains(event.keyCode) else { return }
+        let isDown = event.type == .keyDown
+        // Ignore auto-repeat keyDowns for a key already held
+        if isDown && heldKeys.contains(event.keyCode) { return }
+        if !isDown && !heldKeys.contains(event.keyCode) { return }
+
         let now = event.timestamp
-        let delay = macroEvents.isEmpty ? 0 : min(max(now - macroLastTime, 0), 5)
-        macroLastTime = now
-        macroEvents.append(MacroEvent(keyCode: event.keyCode, isDown: isDown, isModifier: isMod, delay: delay))
+        let delay = moves.isEmpty ? 0 : min(max(now - lastMoveTime, 0), 5)
+        lastMoveTime = now
+        moves.append(MoveEvent(keyCode: event.keyCode, isDown: isDown, delay: delay))
+        if isDown { heldKeys.insert(event.keyCode) } else { heldKeys.remove(event.keyCode) }
+        rebuildPath()
         if popover.isShown { refreshUI() }
     }
 
-    func flagFor(_ k: UInt16) -> NSEvent.ModifierFlags {
-        switch k {
-        case 54, 55: return .command
-        case 56, 60: return .shift
-        case 58, 61: return .option
-        case 59, 62: return .control
-        case 57:     return .capsLock
-        default:     return []
-        }
-    }
+    // MARK: - Replay
 
-    // MARK: - Macro playback
-
-    func togglePlay() {
-        if isCapturingMacro { return }
-        if isPlaying {
-            playbackLock.lock(); playbackCancelled = true; playbackLock.unlock()
+    func toggleReplay() {
+        if isRecordingPath { return }
+        if isReplaying {
+            replayLock.lock(); replayCancelled = true; replayLock.unlock()
             return
         }
-        guard !macroEvents.isEmpty else { return }
+        guard !moves.isEmpty else { return }
         guard AXIsProcessTrusted() else { promptForAccessibilityIfNeeded(); refreshUI(); return }
 
-        isPlaying = true
-        playbackLock.lock(); playbackCancelled = false; playbackLock.unlock()
+        isReplaying = true
+        replayLock.lock(); replayCancelled = false; replayLock.unlock()
         refreshUI()
 
-        let events = macroEvents
+        let events = moves
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let src = CGEventSource(stateID: .hidSystemState)
-            var flags: CGEventFlags = []
             for ev in events {
                 if self.cancelled() { break }
                 if ev.delay > 0 { usleep(useconds_t(ev.delay * 1_000_000)) }
-                if ev.isModifier {
-                    let f = cgFlag(forKeyCode: ev.keyCode)
-                    if ev.isDown { flags.insert(f) } else { flags.remove(f) }
-                }
-                let cg = CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)
-                cg?.flags = flags
-                cg?.post(tap: .cghidEventTap)
+                CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)?.post(tap: .cghidEventTap)
             }
-            DispatchQueue.main.async {
-                self.isPlaying = false
-                self.refreshUI()
+            // Safety: make sure no WASD key is left pressed
+            for k in wasdKeys {
+                CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: false)?.post(tap: .cghidEventTap)
             }
+            DispatchQueue.main.async { self.isReplaying = false; self.refreshUI() }
         }
     }
 
     nonisolated func cancelled() -> Bool {
-        playbackLock.lock(); defer { playbackLock.unlock() }
-        return playbackCancelled
+        replayLock.lock(); defer { replayLock.unlock() }
+        return replayCancelled
     }
 
     // MARK: - Permissions
