@@ -27,5 +27,10 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </plist>
 EOF
 
-codesign -s - --force "$APP"
+# Stable identity keeps the Accessibility grant valid across rebuilds (ad-hoc would re-prompt every build)
+if security find-identity -v -p codesigning | grep -q "AutoClicker Dev"; then
+	codesign -s "AutoClicker Dev" --force "$APP"
+else
+	codesign -s - --force "$APP"
+fi
 echo "Built $APP"
