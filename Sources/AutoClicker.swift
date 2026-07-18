@@ -20,10 +20,26 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+// MARK: - Key names
+
+let keyNames: [UInt16: String] = [
+    0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
+    11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T", 31: "O", 32: "U",
+    34: "I", 35: "P", 37: "L", 38: "J", 40: "K", 45: "N", 46: "M",
+    18: "1", 19: "2", 20: "3", 21: "4", 22: "5", 23: "6", 25: "9", 26: "7", 28: "8", 29: "0",
+    27: "-", 24: "=", 33: "[", 30: "]", 41: ";", 39: "'", 43: ",", 47: ".", 44: "/", 50: "`", 42: "\\",
+    49: "Space", 48: "Tab",
+    122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8",
+    101: "F9", 109: "F10", 103: "F11", 111: "F12", 105: "F13", 107: "F14", 113: "F15",
+    123: "←", 124: "→", 125: "↓", 126: "↑",
+]
+
+let fKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+
 // MARK: - App delegate
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
 
@@ -36,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var startContainer: NSView!
     var startLabel: NSTextField!
     var badgeLabel: NSTextField!
+    var shortcutPill: NSButton!
     var statusDot: NSTextField!
     var statusText: NSTextField!
 
@@ -46,11 +63,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let cpsSteps: [Double] = [1, 2, 5, 10, 20, 25, 50, 100]
     var cpsIndex = 3 // 10 clicks/sec
 
+    // Hotkey (default: Command + D)
+    var hotKeyCode: UInt16 = 2
+    var hotKeyMods: NSEvent.ModifierFlags = [.command]
+    var isRecording = false
+
     var cps: Double { cpsSteps[cpsIndex] }
     var intervalMs: Double { 1000.0 / cps }
     var isRunning: Bool { timer != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        loadSettings()
         buildStatusItem()
         buildPopover()
         installHotkeyMonitors()
@@ -59,6 +82,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         stopTimer()
+    }
+
+    // MARK: - Settings
+
+    func loadSettings() {
+        let d = UserDefaults.standard
+        if d.object(forKey: "hotKeyCode") != nil {
+            hotKeyCode = UInt16(d.integer(forKey: "hotKeyCode"))
+            hotKeyMods = NSEvent.ModifierFlags(rawValue: UInt(d.integer(forKey: "hotKeyMods")))
+        }
+        if d.object(forKey: "cpsIndex") != nil {
+            cpsIndex = min(max(d.integer(forKey: "cpsIndex"), 0), cpsSteps.count - 1)
+        }
+        useRightButton = d.bool(forKey: "useRightButton")
+    }
+
+    func saveSettings() {
+        let d = UserDefaults.standard
+        d.set(Int(hotKeyCode), forKey: "hotKeyCode")
+        d.set(Int(hotKeyMods.rawValue), forKey: "hotKeyMods")
+        d.set(cpsIndex, forKey: "cpsIndex")
+        d.set(useRightButton, forKey: "useRightButton")
+    }
+
+    // MARK: - Hotkey helpers
+
+    func normalized(_ flags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
+        flags.intersection([.command, .option, .control, .shift])
+    }
+
+    func shortcutDisplay() -> String {
+        var s = ""
+        if hotKeyMods.contains(.control) { s += "⌃" }
+        if hotKeyMods.contains(.option) { s += "⌥" }
+        if hotKeyMods.contains(.shift) { s += "⇧" }
+        if hotKeyMods.contains(.command) { s += "⌘" }
+        s += keyNames[hotKeyCode] ?? "Key \(hotKeyCode)"
+        return s
+    }
+
+    func matchesHotkey(_ event: NSEvent) -> Bool {
+        event.keyCode == hotKeyCode && normalized(event.modifierFlags) == hotKeyMods
     }
 
     // MARK: - Status item
@@ -78,8 +143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             refreshUI()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        isRecording = false
     }
 
     // MARK: - Popover UI
@@ -127,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildPopover() {
         let width: CGFloat = 300
-        let height: CGFloat = 292
+        let height: CGFloat = 338
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         root.wantsLayer = true
         root.layer?.backgroundColor = Theme.background.cgColor
@@ -196,8 +266,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                frame: NSRect(x: 0, y: 14, width: 268, height: 22))
         startContainer.addSubview(startLabel)
 
-        badgeLabel = makeLabel("F6", size: 12, weight: .bold, color: Theme.mintDark,
-                               frame: NSRect(x: 224, y: 13, width: 32, height: 22))
+        badgeLabel = makeLabel("⌘D", size: 12, weight: .bold, color: Theme.mintDark,
+                               frame: NSRect(x: 218, y: 13, width: 38, height: 22))
         badgeLabel.wantsLayer = true
         badgeLabel.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.14).cgColor
         badgeLabel.layer?.cornerRadius = 6
@@ -206,15 +276,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let clickGR = NSClickGestureRecognizer(target: self, action: #selector(toggleClicked))
         startContainer.addGestureRecognizer(clickGR)
 
+        // Shortcut row
+        root.addSubview(makeLabel("Shortcut", size: 12, weight: .medium, color: Theme.textSecondary,
+                                  frame: NSRect(x: 16, y: 256, width: 100, height: 16), align: .left))
+        shortcutPill = makeFlatButton("⌘D", size: 12, frame: NSRect(x: 164, y: 250, width: 120, height: 28),
+                                      action: #selector(beginRecording))
+        shortcutPill.layer?.backgroundColor = Theme.card.cgColor
+        shortcutPill.layer?.cornerRadius = 9
+        shortcutPill.layer?.borderWidth = 1
+        shortcutPill.layer?.borderColor = NSColor.clear.cgColor
+        root.addSubview(shortcutPill)
+
         // Bottom row: status + quit
         statusDot = makeLabel("●", size: 11, weight: .bold, color: Theme.textSecondary,
-                              frame: NSRect(x: 16, y: 256, width: 14, height: 16), align: .left)
+                              frame: NSRect(x: 16, y: 302, width: 14, height: 16), align: .left)
         root.addSubview(statusDot)
         statusText = makeLabel("Idle", size: 12, weight: .medium, color: Theme.textSecondary,
-                               frame: NSRect(x: 32, y: 255, width: 160, height: 16), align: .left)
+                               frame: NSRect(x: 32, y: 301, width: 160, height: 16), align: .left)
         root.addSubview(statusText)
 
-        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 249, width: 60, height: 28),
+        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 295, width: 60, height: 28),
                                   action: #selector(quitApp))
         quit.layer?.backgroundColor = Theme.card.cgColor
         quit.layer?.cornerRadius = 9
@@ -227,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: width, height: height)
         popover.behavior = .transient
         popover.appearance = NSAppearance(named: .darkAqua)
+        popover.delegate = self
 
         refreshUI()
     }
@@ -248,11 +330,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clicksNumber.stringValue = "\(clickCount)"
         clicksNumber.textColor = isRunning ? Theme.mint : Theme.textSecondary
 
-        // Start bar
+        // Start bar + hotkey badge
         startContainer.layer?.backgroundColor = (isRunning ? Theme.red : Theme.mint).cgColor
         startLabel.stringValue = isRunning ? "Stop clicking" : "Start clicking"
         startLabel.textColor = isRunning ? Theme.redDark : Theme.mintDark
         badgeLabel.textColor = isRunning ? Theme.redDark : Theme.mintDark
+        let badgeText = shortcutDisplay()
+        badgeLabel.stringValue = badgeText
+        let badgeWidth = (badgeText as NSString).size(withAttributes: [.font: badgeLabel.font!]).width + 14
+        badgeLabel.frame = NSRect(x: 268 - 12 - badgeWidth, y: 13, width: badgeWidth, height: 22)
+
+        // Shortcut pill
+        if isRecording {
+            setTitle(shortcutPill, "Press keys…", size: 12, color: Theme.mint)
+            shortcutPill.layer?.borderColor = Theme.mint.cgColor
+        } else {
+            setTitle(shortcutPill, shortcutDisplay(), size: 12, color: Theme.textPrimary)
+            shortcutPill.layer?.borderColor = NSColor.clear.cgColor
+        }
 
         // Status row
         if !AXIsProcessTrusted() {
@@ -278,18 +373,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Actions
 
-    @objc func pickLeft() { useRightButton = false; refreshUI() }
-    @objc func pickRight() { useRightButton = true; refreshUI() }
+    @objc func pickLeft() { useRightButton = false; saveSettings(); refreshUI() }
+    @objc func pickRight() { useRightButton = true; saveSettings(); refreshUI() }
 
     @objc func slower() {
         if cpsIndex > 0 { cpsIndex -= 1 }
+        saveSettings()
         restartIfRunning()
         refreshUI()
     }
 
     @objc func faster() {
         if cpsIndex < cpsSteps.count - 1 { cpsIndex += 1 }
+        saveSettings()
         restartIfRunning()
+        refreshUI()
+    }
+
+    @objc func beginRecording() {
+        isRecording.toggle()
         refreshUI()
     }
 
@@ -317,22 +419,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Hotkey (F6)
+    // MARK: - Key monitors
 
     func installHotkeyMonitors() {
-        let handler: (NSEvent) -> Void = { [weak self] event in
-            if event.keyCode == 97 { // F6
-                DispatchQueue.main.async { self?.toggleClicked() }
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            DispatchQueue.main.async {
+                guard let self, !self.isRecording else { return }
+                if self.matchesHotkey(event) { self.toggleClicked() }
             }
         }
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.keyCode == 97 {
-                handler(event)
-                return nil
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return MainActor.assumeIsolated {
+                if self.isRecording {
+                    self.handleRecording(event)
+                    return nil
+                }
+                if self.matchesHotkey(event) {
+                    self.toggleClicked()
+                    return nil
+                }
+                return event
             }
-            return event
         }
+    }
+
+    func handleRecording(_ event: NSEvent) {
+        if event.keyCode == 53 { // Esc cancels
+            isRecording = false
+            refreshUI()
+            return
+        }
+        let mods = normalized(event.modifierFlags)
+        // Plain keys would trigger while typing — require a modifier, except for F-keys
+        guard fKeyCodes.contains(event.keyCode) || !mods.isEmpty else {
+            setTitle(shortcutPill, "Add ⌘/⌥/⌃/⇧…", size: 12, color: .systemOrange)
+            return
+        }
+        hotKeyCode = event.keyCode
+        hotKeyMods = mods
+        isRecording = false
+        saveSettings()
+        refreshUI()
     }
 
     // MARK: - Permissions

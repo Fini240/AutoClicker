@@ -10,7 +10,7 @@ A tiny native macOS menu bar autoclicker. No dependencies, ~100 KB, written in a
   - **Clicks per second** stepper (1–100 CPS)
   - Live click counter
   - Mint **Start / Stop** button
-- **F6** global hotkey to start/stop from anywhere (games, other apps)
+- Customizable global hotkey to start/stop from anywhere (default **⌘D**) — click the shortcut pill in the popover and press a new combo
 - Clicks wherever your cursor currently is
 - Menu bar icon turns green while clicking
 
@@ -42,8 +42,8 @@ open build/AutoClicker.app
 
 1. Click the cursor icon in the menu bar
 2. Pick mouse button and speed
-3. Press **Start clicking** (or **F6**), then point your cursor where you want the clicks
-4. Press **F6** again to stop
+3. Press **Start clicking** (or the hotkey, default **⌘D**), then point your cursor where you want the clicks
+4. Press the hotkey again to stop
 
 ## License
 
