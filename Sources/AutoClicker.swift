@@ -61,6 +61,7 @@ enum HotkeyTarget { case click, record, play }
 
 final class PathMapView: NSView {
     var points: [CGPoint] = [] { didSet { needsDisplay = true } }
+    var loopFromIndex = -1 // index of first "return to start" point, or -1
     var recording = false
     override var isFlipped: Bool { true } // y grows downward: matches S = down
 
@@ -105,14 +106,28 @@ final class PathMapView: NSView {
             CGPoint(x: offX + (p.x - minX) * scale, y: offY + (p.y - minY) * scale)
         }
 
-        let line = NSBezierPath()
-        line.lineWidth = 2.5
-        line.lineJoinStyle = .round
-        line.lineCapStyle = .round
-        line.move(to: map(points[0]))
-        for p in points.dropFirst() { line.line(to: map(p)) }
+        let hasLoop = loopFromIndex > 0 && loopFromIndex < points.count
+        let solidEnd = hasLoop ? loopFromIndex : points.count
+
+        let solid = NSBezierPath()
+        solid.lineWidth = 2.5
+        solid.lineJoinStyle = .round
+        solid.lineCapStyle = .round
+        solid.move(to: map(points[0]))
+        for i in 1..<solidEnd { solid.line(to: map(points[i])) }
         Theme.mint.setStroke()
-        line.stroke()
+        solid.stroke()
+
+        if hasLoop {
+            let dashed = NSBezierPath()
+            dashed.lineWidth = 2
+            dashed.lineCapStyle = .round
+            dashed.setLineDash([5, 4], count: 2, phase: 0)
+            dashed.move(to: map(points[loopFromIndex - 1]))
+            for i in loopFromIndex..<points.count { dashed.line(to: map(points[i])) }
+            Theme.mint.withAlphaComponent(0.5).setStroke()
+            dashed.stroke()
+        }
 
         // Start (green) and end (red) markers
         func dot(_ p: CGPoint, _ color: NSColor) {
@@ -163,6 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var lastMoveTime: TimeInterval = 0
     var eventTap: CFMachPort?
     var tapRunLoopSource: CFRunLoopSource?
+    var closeLoop = false
+    var loopToggle: NSButton!
 
     // Replay
     nonisolated(unsafe) var replayCancelled = false
@@ -201,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             cpsIndex = min(max(d.integer(forKey: "cpsIndex"), 0), cpsSteps.count - 1)
         }
         useRightButton = d.bool(forKey: "useRightButton")
+        closeLoop = d.bool(forKey: "closeLoop")
         if let data = d.data(forKey: "moves"),
            let m = try? JSONDecoder().decode([MoveEvent].self, from: data) {
             moves = m
@@ -214,6 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         d.set(try? JSONEncoder().encode(playHK), forKey: "playHK")
         d.set(cpsIndex, forKey: "cpsIndex")
         d.set(useRightButton, forKey: "useRightButton")
+        d.set(closeLoop, forKey: "closeLoop")
         d.set(try? JSONEncoder().encode(moves), forKey: "moves")
     }
 
@@ -420,6 +439,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         mapView.wantsLayer = true
         root.addSubview(mapView)
 
+        // Loop toggle, overlaid on the map's top-right corner
+        loopToggle = makeFlatButton("⟳ Loop", size: 11, frame: NSRect(x: 206, y: 332, width: 70, height: 24), action: #selector(toggleLoop))
+        loopToggle.layer?.cornerRadius = 8
+        root.addSubview(loopToggle)
+
         // Record + play rows
         root.addSubview(makeLabel("Record path", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 510, width: 140, height: 16), align: .left))
         recordPill = makePill(NSRect(x: 164, y: 504, width: 120, height: 28), action: #selector(recordRecordHK))
@@ -494,6 +518,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         mapView.recording = isRecordingPath
 
+        if closeLoop {
+            loopToggle.layer?.backgroundColor = Theme.segmentOn.cgColor
+            setTitle(loopToggle, "⟳ Loop", size: 11, color: Theme.mint)
+        } else {
+            loopToggle.layer?.backgroundColor = Theme.control.cgColor
+            setTitle(loopToggle, "⟳ Loop", size: 11, color: Theme.textSecondary)
+        }
+
         // Path status
         let presses = moves.filter { $0.isDown }.count
         let duration = moves.reduce(0.0) { $0 + $1.delay }
@@ -527,12 +559,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // MARK: - Path building
 
-    func rebuildPath() {
+    let pathSpeed = 100.0
+
+    // Integrate WASD holds into a 2D path; returns the polyline and the final position.
+    func integrate(_ evs: [MoveEvent]) -> (points: [CGPoint], end: CGPoint) {
         var pos = CGPoint.zero
         var pts: [CGPoint] = [pos]
         var held: Set<UInt16> = []
-        let speed = 100.0
-        for ev in moves {
+        for ev in evs {
             let dt = ev.delay
             if dt > 0 && !held.isEmpty {
                 var dx = 0.0, dy = 0.0
@@ -540,13 +574,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if held.contains(keyS) { dy += 1 }
                 if held.contains(keyA) { dx -= 1 }
                 if held.contains(keyD) { dx += 1 }
-                pos.x += dx * speed * dt
-                pos.y += dy * speed * dt
+                pos.x += dx * pathSpeed * dt
+                pos.y += dy * pathSpeed * dt
                 pts.append(pos)
             }
             if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
         }
-        mapView.points = pts.count > 1 ? pts : []
+        return (pts, pos)
+    }
+
+    // WASD presses that walk from `end` back to the origin: X axis first, then Y.
+    func returnMoves(end: CGPoint) -> [MoveEvent] {
+        var evs: [MoveEvent] = []
+        let tx = abs(end.x) / pathSpeed
+        let ty = abs(end.y) / pathSpeed
+        if tx > 0.02 {
+            let key = end.x > 0 ? keyA : keyD
+            evs.append(MoveEvent(keyCode: key, isDown: true, delay: 0.08))
+            evs.append(MoveEvent(keyCode: key, isDown: false, delay: tx))
+        }
+        if ty > 0.02 {
+            let key = end.y > 0 ? keyW : keyS
+            evs.append(MoveEvent(keyCode: key, isDown: true, delay: 0.08))
+            evs.append(MoveEvent(keyCode: key, isDown: false, delay: ty))
+        }
+        return evs
+    }
+
+    func rebuildPath() {
+        let (pts, end) = integrate(moves)
+        guard pts.count > 1 else { mapView.loopFromIndex = -1; mapView.points = []; return }
+        var all = pts
+        if closeLoop && (abs(end.x) > 0.5 || abs(end.y) > 0.5) {
+            mapView.loopFromIndex = all.count
+            all.append(CGPoint(x: 0, y: end.y)) // X corrected
+            all.append(CGPoint(x: 0, y: 0))     // Y corrected → back at start
+        } else {
+            mapView.loopFromIndex = -1
+        }
+        mapView.points = all
     }
 
     // MARK: - Actions
@@ -557,6 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func faster() { if cpsIndex < cpsSteps.count - 1 { cpsIndex += 1 }; saveSettings(); restartIfRunning(); refreshUI() }
     @objc func quitApp() { NSApp.terminate(nil) }
     @objc func clearPath() { moves = []; rebuildPath(); saveSettings(); refreshUI() }
+    @objc func toggleLoop() { closeLoop.toggle(); saveSettings(); rebuildPath(); refreshUI() }
 
     @objc func recordClickHK() { recordingTarget = (recordingTarget == .click) ? nil : .click; refreshUI() }
     @objc func recordRecordHK() { recordingTarget = (recordingTarget == .record) ? nil : .record; refreshUI() }
@@ -716,7 +783,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         replayLock.lock(); replayCancelled = false; replayLock.unlock()
         refreshUI()
 
-        let events = moves
+        var events = moves
+        if closeLoop {
+            let (_, end) = integrate(moves)
+            events += returnMoves(end: end)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let src = CGEventSource(stateID: .hidSystemState)

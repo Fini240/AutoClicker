@@ -16,6 +16,7 @@ A tiny native macOS menu bar autoclicker. No dependencies, ~100 KB, written in a
   - **Record path** hotkey (default **⌘R**) starts/stops recording; the map updates live as you move
   - **Replay path** hotkey (default **⌘P**) replays the movement with the original timing and hold durations
   - Green dot marks the start of the path, red dot the end
+  - **Loop** toggle (on the map) closes the path: after replaying, it automatically walks back to the starting point, so the movement repeats as a closed loop. The return leg is shown as a dashed line on the map.
   - Both hotkeys are rebindable, and the recorded path is saved across restarts
 - Menu bar icon turns green while clicking or replaying, red while recording
 
@@ -56,6 +57,7 @@ open build/AutoClicker.app
 2. Move with **W / A / S / D**; the map in the popover draws your path in real time (W = up, S = down, A = left, D = right), and hold duration determines distance
 3. Press **⌘R** again to stop
 4. Press the **Replay path** hotkey (default **⌘P**) to replay the movement; press it again to stop early
+5. Optional: turn on **Loop** (top-right of the map) to make replay return to the starting point, closing the path into a repeatable loop
 
 The path is a visualization of the recorded key timing — replay re-sends the same W/A/S/D key presses, so it works in any app or game that reads those keys.
 
