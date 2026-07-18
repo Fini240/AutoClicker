@@ -137,7 +137,10 @@ final class PathMapView: NSView {
             color.setFill(); path.fill()
         }
         dot(points.first!, Theme.green)
-        dot(points.last!, Theme.red)
+        // Red marks the true recorded end (where you stop / stand); with Loop on, the dashed
+        // reposition leg runs from there back to the green start.
+        let endIdx = (loopFromIndex > 0 && loopFromIndex <= points.count) ? loopFromIndex - 1 : points.count - 1
+        dot(points[endIdx], Theme.red)
     }
 }
 
@@ -786,7 +789,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         var events = moves
         if closeLoop {
             let (_, end) = integrate(moves)
-            events += returnMoves(end: end)
+            // Reposition from the recorded end point back to the start FIRST, then run the
+            // loop — so replay always traces the original path from the original start point,
+            // repeating without drift even when the recording doesn't end where it began.
+            events = returnMoves(end: end) + moves
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
