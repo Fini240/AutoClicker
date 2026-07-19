@@ -241,6 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var selStart = -1, selEnd = -1 // event-index range of the marked section in history
     var isMarking = false
     var markStartIdx = 0
+    var markTime: TimeInterval = 0   // when ⌘R started the mark (same clock as event timestamps)
+    var markLeadDelay: Double = 0    // gap between mark start and the section's first event
     var heldKeys: Set<UInt16> = []
     var lastMoveTime: TimeInterval = 0
     var eventTap: CFMachPort?
@@ -734,10 +736,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Copy the marked slice of history into a self-contained event list: keys already
     // held when the section starts get synthesized presses, keys still held at the end
     // get released, so replay can't start mid-hold or leave a key stuck down.
-    func materializeSelection() {
+    func materializeSelection(leadDelay: Double = 0, tailDelay: Double = 0) {
         guard selStart >= 0, selEnd >= selStart, selEnd < history.count else { moves = []; return }
         var slice = Array(history[selStart...selEnd])
-        slice[0].delay = 0
+        slice[0].delay = leadDelay
         var held: Set<UInt16> = []
         for ev in history[..<selStart] {
             if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
@@ -746,7 +748,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for ev in slice {
             if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
         }
-        let tail = held.map { MoveEvent(keyCode: $0, isDown: false, delay: 0) }
+        let tail = held.enumerated().map { i, k in
+            MoveEvent(keyCode: k, isDown: false, delay: i == 0 ? tailDelay : 0)
+        }
         moves = lead + slice + tail
     }
 
@@ -914,7 +918,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             selStart = markStartIdx
             selEnd = history.count - 1
             if selEnd < selStart { selStart = -1; selEnd = -1 }
-            materializeSelection()
+            // Keys still held when the mark ends kept moving after the last event —
+            // extend the synthesized releases by that time so the last leg isn't cut short.
+            let tailDelay = heldKeys.isEmpty ? 0 : min(max(ProcessInfo.processInfo.systemUptime - lastMoveTime, 0), 5)
+            materializeSelection(leadDelay: markLeadDelay, tailDelay: tailDelay)
             rebuildPath()
             saveSettings()
         } else {
@@ -922,6 +929,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 promptForAccessibilityIfNeeded(); refreshUI(); return
             }
             markStartIdx = history.count
+            markTime = ProcessInfo.processInfo.systemUptime
+            markLeadDelay = 0
             isMarking = true
         }
         refreshUI()
@@ -935,6 +944,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         let delay = history.isEmpty ? 0 : min(max(time - lastMoveTime, 0), 5)
         lastMoveTime = time
+        // First event of a live mark: remember its offset from the ⌘R press, so keys
+        // already held at mark start reproduce their exact lead-in movement on replay
+        if isMarking && history.count == markStartIdx {
+            markLeadDelay = min(max(time - markTime, 0), 5)
+        }
         history.append(MoveEvent(keyCode: keyCode, isDown: isDown, delay: delay))
         historyDuration += delay
         trimHistory()
@@ -983,11 +997,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // delay, so per-sleep overshoot can't accumulate and shift later events.
             let start = ProcessInfo.processInfo.systemUptime
             var due = 0.0
-            for ev in events {
-                if self.cancelled() { break }
+            replay: for ev in events {
                 due += ev.delay
-                let remaining = start + due - ProcessInfo.processInfo.systemUptime
-                if remaining > 0 { usleep(useconds_t(remaining * 1_000_000)) }
+                // Sleep in short slices so ⌘P cancels within ~0.1s even inside long gaps
+                while true {
+                    if self.cancelled() { break replay }
+                    let remaining = start + due - ProcessInfo.processInfo.systemUptime
+                    if remaining <= 0 { break }
+                    usleep(useconds_t(min(remaining, 0.1) * 1_000_000))
+                }
                 let e = CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)
                 e?.flags = [] // don't inherit the still-held replay hotkey modifiers (e.g. ⌘)
                 e?.post(tap: .cghidEventTap)
