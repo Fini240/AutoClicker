@@ -990,7 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // repeating without drift even when the recording doesn't end where it began.
             events = returnMoves(end: end) + moves
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self else { return }
             let src = CGEventSource(stateID: .hidSystemState)
             // Schedule against one absolute timeline: each sleep targets start + cumulative
@@ -999,13 +999,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             var due = 0.0
             replay: for ev in events {
                 due += ev.delay
-                // Sleep in short slices so ⌘P cancels within ~0.1s even inside long gaps
+                let deadline = start + due
+                // Sleep in short slices (so ⌘P cancels within ~0.1s) until just before the
+                // deadline, then spin the last 2 ms — usleep alone overshoots by several ms
+                // (timer coalescing), which visibly bends long paths at 100 px/s.
                 while true {
                     if self.cancelled() { break replay }
-                    let remaining = start + due - ProcessInfo.processInfo.systemUptime
-                    if remaining <= 0 { break }
-                    usleep(useconds_t(min(remaining, 0.1) * 1_000_000))
+                    let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                    if remaining <= 0.002 { break }
+                    usleep(useconds_t(min(remaining - 0.002, 0.1) * 1_000_000))
                 }
+                while ProcessInfo.processInfo.systemUptime < deadline {}
                 let e = CGEvent(keyboardEventSource: src, virtualKey: ev.keyCode, keyDown: ev.isDown)
                 e?.flags = [] // don't inherit the still-held replay hotkey modifiers (e.g. ⌘)
                 e?.post(tap: .cghidEventTap)
