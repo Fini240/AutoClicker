@@ -60,9 +60,10 @@ enum HotkeyTarget { case click, record, play }
 // MARK: - Path map view
 
 final class PathMapView: NSView {
-    var points: [CGPoint] = [] { didSet { needsDisplay = true } }
-    var loopFromIndex = -1 // index of first "return to start" point, or -1
-    var recording = false
+    var points: [CGPoint] = [] { didSet { needsDisplay = true } }        // full history path (drawn dim)
+    var selRange: ClosedRange<Int>? { didSet { needsDisplay = true } }   // point indices of the marked section (drawn bright)
+    var loopPoints: [CGPoint] = [] { didSet { needsDisplay = true } }    // dashed leg closing the section back to its start
+    var marking = false
     override var isFlipped: Bool { true } // y grows downward: matches S = down
 
     override func draw(_ dirtyRect: NSRect) {
@@ -82,7 +83,7 @@ final class PathMapView: NSView {
         grid.stroke()
 
         guard points.count > 1 else {
-            let msg = recording ? "Move with W A S D…" : "Press Record, then move with W A S D"
+            let msg = "Always recording — move with W A S D"
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: Theme.textSecondary,
@@ -106,41 +107,99 @@ final class PathMapView: NSView {
             CGPoint(x: offX + (p.x - minX) * scale, y: offY + (p.y - minY) * scale)
         }
 
-        let hasLoop = loopFromIndex > 0 && loopFromIndex < points.count
-        let solidEnd = hasLoop ? loopFromIndex : points.count
+        func polyline(_ range: ClosedRange<Int>, width: CGFloat) -> NSBezierPath {
+            let path = NSBezierPath()
+            path.lineWidth = width
+            path.lineJoinStyle = .round
+            path.lineCapStyle = .round
+            path.move(to: map(points[range.lowerBound]))
+            for i in (range.lowerBound + 1)...range.upperBound { path.line(to: map(points[i])) }
+            return path
+        }
 
-        let solid = NSBezierPath()
-        solid.lineWidth = 2.5
-        solid.lineJoinStyle = .round
-        solid.lineCapStyle = .round
-        solid.move(to: map(points[0]))
-        for i in 1..<solidEnd { solid.line(to: map(points[i])) }
+        // Full history, dim; marked section on top, bright
+        Theme.mint.withAlphaComponent(marking ? 0.5 : 0.25).setStroke()
+        polyline(0...(points.count - 1), width: 2).stroke()
+
+        guard let sel = selRange, sel.lowerBound >= 0, sel.upperBound < points.count else { return }
         Theme.mint.setStroke()
-        solid.stroke()
+        if sel.upperBound > sel.lowerBound {
+            polyline(sel, width: 2.5).stroke()
+        }
 
-        if hasLoop {
+        // Dashed leg: with Loop on, replay walks from the section's red end back to its green start
+        if !loopPoints.isEmpty {
             let dashed = NSBezierPath()
             dashed.lineWidth = 2
             dashed.lineCapStyle = .round
             dashed.setLineDash([5, 4], count: 2, phase: 0)
-            dashed.move(to: map(points[loopFromIndex - 1]))
-            for i in loopFromIndex..<points.count { dashed.line(to: map(points[i])) }
+            dashed.move(to: map(points[sel.upperBound]))
+            for p in loopPoints { dashed.line(to: map(p)) }
             Theme.mint.withAlphaComponent(0.5).setStroke()
             dashed.stroke()
         }
 
-        // Start (green) and end (red) markers
+        // Start (green) and end (red) markers of the marked section
         func dot(_ p: CGPoint, _ color: NSColor) {
             let r: CGFloat = 4.5
             let c = map(p)
             let path = NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
             color.setFill(); path.fill()
         }
-        dot(points.first!, Theme.green)
-        // Red marks the true recorded end (where you stop / stand); with Loop on, the dashed
-        // reposition leg runs from there back to the green start.
-        let endIdx = (loopFromIndex > 0 && loopFromIndex <= points.count) ? loopFromIndex - 1 : points.count - 1
-        dot(points[endIdx], Theme.red)
+        dot(points[sel.lowerBound], Theme.green)
+        dot(points[sel.upperBound], Theme.red)
+    }
+}
+
+// MARK: - Range slider (marks a section of the history)
+
+final class RangeSliderView: NSView {
+    var lo: CGFloat = 0, hi: CGFloat = 1 // fractions of the history timeline
+    var hasHistory = false
+    var onChange: ((CGFloat, CGFloat) -> Void)?
+    private(set) var isDragging = false
+    private var activeHandle = 0 // 1 = lo, 2 = hi
+    private let inset: CGFloat = 12
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let midY = bounds.height / 2
+        let track = NSBezierPath(roundedRect: NSRect(x: inset, y: midY - 2, width: bounds.width - 2 * inset, height: 4), xRadius: 2, yRadius: 2)
+        Theme.control.setFill(); track.fill()
+        let accent = hasHistory ? Theme.mint : Theme.textSecondary
+        let xl = xFor(lo), xr = xFor(hi)
+        let fill = NSBezierPath(roundedRect: NSRect(x: xl, y: midY - 2, width: max(xr - xl, 0), height: 4), xRadius: 2, yRadius: 2)
+        accent.withAlphaComponent(0.45).setFill(); fill.fill()
+        for x in [xl, xr] {
+            let r: CGFloat = 7
+            accent.setFill()
+            NSBezierPath(ovalIn: NSRect(x: x - r, y: midY - r, width: 2 * r, height: 2 * r)).fill()
+        }
+    }
+
+    private func xFor(_ f: CGFloat) -> CGFloat { inset + f * (bounds.width - 2 * inset) }
+    private func frac(at x: CGFloat) -> CGFloat { max(0, min(1, (x - inset) / (bounds.width - 2 * inset))) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard hasHistory else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        activeHandle = abs(x - xFor(lo)) <= abs(x - xFor(hi)) ? 1 : 2
+        isDragging = true
+        drag(to: x)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        drag(to: convert(event.locationInWindow, from: nil).x)
+    }
+
+    override func mouseUp(with event: NSEvent) { isDragging = false; activeHandle = 0 }
+
+    private func drag(to x: CGFloat) {
+        let f = frac(at: x)
+        if activeHandle == 1 { lo = min(f, hi) } else { hi = max(f, lo) }
+        needsDisplay = true
+        onChange?(lo, hi)
     }
 }
 
@@ -174,15 +233,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var clickRef, recordRef, playRef: EventHotKeyRef?
     var recordingTarget: HotkeyTarget?
 
-    // Movement recording
-    var moves: [MoveEvent] = []
-    var isRecordingPath = false
+    // Movement recording: always-on rolling history + a marked section of it
+    var history: [MoveEvent] = []
+    var historyDuration: Double = 0
+    let historyCap: Double = 180 // keep the last 3 minutes
+    var moves: [MoveEvent] = []  // materialized marked section (what replay plays)
+    var selStart = -1, selEnd = -1 // event-index range of the marked section in history
+    var isMarking = false
+    var markStartIdx = 0
     var heldKeys: Set<UInt16> = []
     var lastMoveTime: TimeInterval = 0
     var eventTap: CFMachPort?
     var tapRunLoopSource: CFRunLoopSource?
+    var tapRetryTimer: Timer?
     var closeLoop = false
     var loopToggle: NSButton!
+    var rangeSlider: RangeSliderView!
 
     // Replay
     nonisolated(unsafe) var replayCancelled = false
@@ -201,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         installHotkeyHandler()
         registerHotkeys()
         promptForAccessibilityIfNeeded()
+        startAlwaysOnCapture()
     }
 
     func applicationWillTerminate(_ notification: Notification) { stopTimer() }
@@ -226,6 +293,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
            let m = try? JSONDecoder().decode([MoveEvent].self, from: data) {
             moves = m
         }
+        if let data = d.data(forKey: "history"),
+           let h = try? JSONDecoder().decode([MoveEvent].self, from: data) {
+            history = h
+            historyDuration = h.reduce(0) { $0 + $1.delay }
+        }
+        selStart = d.object(forKey: "selStart") != nil ? d.integer(forKey: "selStart") : -1
+        selEnd = d.object(forKey: "selEnd") != nil ? d.integer(forKey: "selEnd") : -1
+        if selStart < 0 || selEnd < selStart || selEnd >= history.count { selStart = -1; selEnd = -1 }
     }
 
     func saveSettings() {
@@ -237,6 +312,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         d.set(useRightButton, forKey: "useRightButton")
         d.set(closeLoop, forKey: "closeLoop")
         d.set(try? JSONEncoder().encode(moves), forKey: "moves")
+        d.set(try? JSONEncoder().encode(history), forKey: "history")
+        d.set(selStart, forKey: "selStart")
+        d.set(selEnd, forKey: "selEnd")
     }
 
     // MARK: - Hotkey helpers
@@ -300,7 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard recordingTarget == nil else { return }
         switch id {
         case 1: toggleClicked()
-        case 2: toggleRecording()
+        case 2: toggleMarking()
         case 3: toggleReplay()
         default: break
         }
@@ -374,7 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func buildPopover() {
         let width: CGFloat = 300
-        let height: CGFloat = 628
+        let height: CGFloat = 658
         let root = FlippedView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         root.wantsLayer = true
         root.layer?.backgroundColor = Theme.background.cgColor
@@ -447,27 +525,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         loopToggle.layer?.cornerRadius = 8
         root.addSubview(loopToggle)
 
-        // Record + play rows
-        root.addSubview(makeLabel("Record path", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 510, width: 140, height: 16), align: .left))
-        recordPill = makePill(NSRect(x: 164, y: 504, width: 120, height: 28), action: #selector(recordRecordHK))
+        // Section slider: drag the handles to mark out the part of the history to replay
+        rangeSlider = RangeSliderView(frame: NSRect(x: 16, y: 500, width: 268, height: 28))
+        rangeSlider.onChange = { [weak self] lo, hi in self?.sliderChanged(lo: lo, hi: hi) }
+        root.addSubview(rangeSlider)
+
+        // Mark + play rows
+        root.addSubview(makeLabel("Mark section", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 540, width: 140, height: 16), align: .left))
+        recordPill = makePill(NSRect(x: 164, y: 534, width: 120, height: 28), action: #selector(recordRecordHK))
         root.addSubview(recordPill)
-        root.addSubview(makeLabel("Replay path", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 544, width: 140, height: 16), align: .left))
-        playPill = makePill(NSRect(x: 164, y: 538, width: 120, height: 28), action: #selector(recordPlayHK))
+        root.addSubview(makeLabel("Replay section", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 574, width: 140, height: 16), align: .left))
+        playPill = makePill(NSRect(x: 164, y: 568, width: 120, height: 28), action: #selector(recordPlayHK))
         root.addSubview(playPill)
 
         // Status + clear + quit
-        pathStatus = makeLabel("No path recorded", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 578, width: 150, height: 16), align: .left)
+        pathStatus = makeLabel("No section marked", size: 12, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 16, y: 608, width: 150, height: 16), align: .left)
         root.addSubview(pathStatus)
-        let clear = makeFlatButton("Clear", size: 12, frame: NSRect(x: 160, y: 572, width: 56, height: 28), action: #selector(clearPath))
+        let clear = makeFlatButton("Clear", size: 12, frame: NSRect(x: 160, y: 602, width: 56, height: 28), action: #selector(clearPath))
         clear.layer?.backgroundColor = Theme.card.cgColor; clear.layer?.cornerRadius = 9
         root.addSubview(clear)
-        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 572, width: 60, height: 28), action: #selector(quitApp))
+        let quit = makeFlatButton("Quit", size: 12, frame: NSRect(x: 224, y: 602, width: 60, height: 28), action: #selector(quitApp))
         quit.layer?.backgroundColor = Theme.card.cgColor; quit.layer?.cornerRadius = 9
         root.addSubview(quit)
 
-        statusDot = makeLabel("●", size: 10, weight: .bold, color: Theme.textSecondary, frame: NSRect(x: 16, y: 604, width: 12, height: 14), align: .left)
+        statusDot = makeLabel("●", size: 10, weight: .bold, color: Theme.textSecondary, frame: NSRect(x: 16, y: 634, width: 12, height: 14), align: .left)
         root.addSubview(statusDot)
-        statusText = makeLabel("Idle", size: 11, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 30, y: 603, width: 254, height: 14), align: .left)
+        statusText = makeLabel("Idle", size: 11, weight: .medium, color: Theme.textSecondary, frame: NSRect(x: 30, y: 633, width: 254, height: 14), align: .left)
         root.addSubview(statusText)
 
         let vc = NSViewController()
@@ -519,7 +602,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         pillTitle(recordPill, hk: recordHK, target: .record)
         pillTitle(playPill, hk: playHK, target: .play)
 
-        mapView.recording = isRecordingPath
+        mapView.marking = isMarking
+        mapView.needsDisplay = true
+
+        if !rangeSlider.isDragging {
+            rangeSlider.hasHistory = history.count > 1
+            if selStart >= 0, selEnd >= selStart, selEnd < history.count, historyDuration > 0 {
+                var t = 0.0
+                var times: [Double] = []
+                times.reserveCapacity(history.count)
+                for ev in history { t += ev.delay; times.append(t) }
+                rangeSlider.lo = CGFloat((times[selStart] - history[selStart].delay) / historyDuration)
+                rangeSlider.hi = CGFloat(times[selEnd] / historyDuration)
+            } else {
+                rangeSlider.lo = 0; rangeSlider.hi = 1
+            }
+            rangeSlider.needsDisplay = true
+        }
 
         if closeLoop {
             loopToggle.layer?.backgroundColor = Theme.segmentOn.cgColor
@@ -532,17 +631,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // Path status
         let presses = moves.filter { $0.isDown }.count
         let duration = moves.reduce(0.0) { $0 + $1.delay }
-        if isRecordingPath {
-            pathStatus.stringValue = "● Recording…  \(presses) moves"
+        if isMarking {
+            pathStatus.stringValue = "● Marking… move now"
             pathStatus.textColor = Theme.red
         } else if isReplaying {
             pathStatus.stringValue = "▶ Replaying…"
             pathStatus.textColor = Theme.mint
         } else if moves.isEmpty {
-            pathStatus.stringValue = "No path recorded"
+            pathStatus.stringValue = history.isEmpty ? "Waiting for movement…" : "No section marked"
             pathStatus.textColor = Theme.textSecondary
         } else {
-            pathStatus.stringValue = String(format: "%.1fs · %d moves", duration, presses)
+            pathStatus.stringValue = String(format: "Section %.1fs · %d moves", duration, presses)
             pathStatus.textColor = Theme.textPrimary
         }
 
@@ -551,23 +650,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         } else if isRunning {
             statusDot.textColor = Theme.mint; statusText.stringValue = "Clicking…"; statusText.textColor = Theme.mint
         } else {
-            statusDot.textColor = Theme.textSecondary; statusText.stringValue = "Idle"; statusText.textColor = Theme.textSecondary
+            statusDot.textColor = Theme.textSecondary
+            statusText.stringValue = history.isEmpty ? "Idle · recording WASD" : String(format: "Idle · %.0fs of history", historyDuration)
+            statusText.textColor = Theme.textSecondary
         }
 
         statusItem.button?.image = NSImage(
-            systemSymbolName: (isRunning || isRecordingPath || isReplaying) ? "cursorarrow.click.badge.clock" : "cursorarrow.click",
+            systemSymbolName: (isRunning || isMarking || isReplaying) ? "cursorarrow.click.badge.clock" : "cursorarrow.click",
             accessibilityDescription: "AutoClicker")
-        statusItem.button?.contentTintColor = isRecordingPath ? Theme.red : ((isRunning || isReplaying) ? Theme.mint : nil)
+        statusItem.button?.contentTintColor = isMarking ? Theme.red : ((isRunning || isReplaying) ? Theme.mint : nil)
     }
 
     // MARK: - Path building
 
     let pathSpeed = 100.0
 
-    // Integrate WASD holds into a 2D path; returns the polyline and the final position.
-    func integrate(_ evs: [MoveEvent]) -> (points: [CGPoint], end: CGPoint) {
+    // Integrate WASD holds into a 2D path; returns the polyline, the final position,
+    // and for each event the index of the point reached after it.
+    func integrate(_ evs: [MoveEvent]) -> (points: [CGPoint], end: CGPoint, eventPoint: [Int]) {
         var pos = CGPoint.zero
         var pts: [CGPoint] = [pos]
+        var eventPoint: [Int] = []
+        eventPoint.reserveCapacity(evs.count)
         var held: Set<UInt16> = []
         for ev in evs {
             let dt = ev.delay
@@ -582,8 +686,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 pts.append(pos)
             }
             if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
+            eventPoint.append(pts.count - 1)
         }
-        return (pts, pos)
+        return (pts, pos, eventPoint)
     }
 
     // WASD presses that walk from `end` back to the origin: X axis first, then Y.
@@ -605,17 +710,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func rebuildPath() {
-        let (pts, end) = integrate(moves)
-        guard pts.count > 1 else { mapView.loopFromIndex = -1; mapView.points = []; return }
-        var all = pts
-        if closeLoop && (abs(end.x) > 0.5 || abs(end.y) > 0.5) {
-            mapView.loopFromIndex = all.count
-            all.append(CGPoint(x: 0, y: end.y)) // X corrected
-            all.append(CGPoint(x: 0, y: 0))     // Y corrected → back at start
-        } else {
-            mapView.loopFromIndex = -1
+        let (pts, _, eventPoint) = integrate(history)
+        guard pts.count > 1 else {
+            mapView.points = []; mapView.selRange = nil; mapView.loopPoints = []
+            return
         }
-        mapView.points = all
+        mapView.points = pts
+        guard selStart >= 0, selEnd >= selStart, selEnd < history.count else {
+            mapView.selRange = nil; mapView.loopPoints = []
+            return
+        }
+        let lo = selStart == 0 ? 0 : eventPoint[selStart - 1]
+        let hi = eventPoint[selEnd]
+        mapView.selRange = lo...hi
+        let start = pts[lo], end = pts[hi]
+        if closeLoop && (abs(end.x - start.x) > 0.5 || abs(end.y - start.y) > 0.5) {
+            mapView.loopPoints = [CGPoint(x: start.x, y: end.y), start] // X corrected, then Y → back at section start
+        } else {
+            mapView.loopPoints = []
+        }
+    }
+
+    // Copy the marked slice of history into a self-contained event list: keys already
+    // held when the section starts get synthesized presses, keys still held at the end
+    // get released, so replay can't start mid-hold or leave a key stuck down.
+    func materializeSelection() {
+        guard selStart >= 0, selEnd >= selStart, selEnd < history.count else { moves = []; return }
+        var slice = Array(history[selStart...selEnd])
+        slice[0].delay = 0
+        var held: Set<UInt16> = []
+        for ev in history[..<selStart] {
+            if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
+        }
+        let lead = held.map { MoveEvent(keyCode: $0, isDown: true, delay: 0) }
+        for ev in slice {
+            if ev.isDown { held.insert(ev.keyCode) } else { held.remove(ev.keyCode) }
+        }
+        let tail = held.map { MoveEvent(keyCode: $0, isDown: false, delay: 0) }
+        moves = lead + slice + tail
+    }
+
+    func index(atFraction f: CGFloat) -> Int {
+        guard !history.isEmpty, historyDuration > 0 else { return -1 }
+        let target = Double(f) * historyDuration
+        var t = 0.0
+        for (i, ev) in history.enumerated() {
+            t += ev.delay
+            if t >= target { return i }
+        }
+        return history.count - 1
+    }
+
+    func sliderChanged(lo: CGFloat, hi: CGFloat) {
+        selStart = index(atFraction: lo)
+        selEnd = index(atFraction: hi)
+        if selStart < 0 || selEnd < selStart { selStart = -1; selEnd = -1 }
+        materializeSelection()
+        rebuildPath()
+        saveSettings()
+        refreshUI()
     }
 
     // MARK: - Actions
@@ -625,7 +778,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func slower() { if cpsIndex > 0 { cpsIndex -= 1 }; saveSettings(); restartIfRunning(); refreshUI() }
     @objc func faster() { if cpsIndex < cpsSteps.count - 1 { cpsIndex += 1 }; saveSettings(); restartIfRunning(); refreshUI() }
     @objc func quitApp() { NSApp.terminate(nil) }
-    @objc func clearPath() { moves = []; rebuildPath(); saveSettings(); refreshUI() }
+    @objc func clearPath() {
+        history = []; historyDuration = 0
+        moves = []; selStart = -1; selEnd = -1; isMarking = false
+        rebuildPath(); saveSettings(); refreshUI()
+    }
     @objc func toggleLoop() { closeLoop.toggle(); saveSettings(); rebuildPath(); refreshUI() }
 
     @objc func recordClickHK() { recordingTarget = (recordingTarget == .click) ? nil : .click; refreshUI() }
@@ -733,48 +890,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
     }
 
-    // MARK: - Movement recording
+    // MARK: - Movement recording (always on)
 
-    func toggleRecording() {
+    // Capture runs from launch; retry until Accessibility is granted, then the tap sticks.
+    func startAlwaysOnCapture() {
+        if AXIsProcessTrusted(), startEventTap() { return }
+        tapRetryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if AXIsProcessTrusted(), self.startEventTap() {
+                    self.tapRetryTimer?.invalidate(); self.tapRetryTimer = nil
+                    self.refreshUI()
+                }
+            }
+        }
+    }
+
+    // ⌘R marks a section live: press once at the start, again at the end.
+    func toggleMarking() {
         if isReplaying { return }
-        if isRecordingPath {
-            // Release any keys still held, so replay doesn't leave a key stuck down
-            for k in heldKeys { moves.append(MoveEvent(keyCode: k, isDown: false, delay: 0)) }
-            heldKeys.removeAll()
-            isRecordingPath = false
-            stopEventTap()
+        if isMarking {
+            isMarking = false
+            selStart = markStartIdx
+            selEnd = history.count - 1
+            if selEnd < selStart { selStart = -1; selEnd = -1 }
+            materializeSelection()
             rebuildPath()
             saveSettings()
         } else {
             guard AXIsProcessTrusted(), startEventTap() else {
                 promptForAccessibilityIfNeeded(); refreshUI(); return
             }
-            moves = []
-            heldKeys.removeAll()
-            isRecordingPath = true
-            rebuildPath()
+            markStartIdx = history.count
+            isMarking = true
         }
         refreshUI()
     }
 
     func captureMove(keyCode: UInt16, isDown: Bool, at time: TimeInterval) {
-        guard isRecordingPath, wasdKeys.contains(keyCode) else { return }
+        guard !isReplaying, wasdKeys.contains(keyCode) else { return }
         // Ignore auto-repeat keyDowns for a key already held
         if isDown && heldKeys.contains(keyCode) { return }
         if !isDown && !heldKeys.contains(keyCode) { return }
 
-        let delay = moves.isEmpty ? 0 : min(max(time - lastMoveTime, 0), 5)
+        let delay = history.isEmpty ? 0 : min(max(time - lastMoveTime, 0), 5)
         lastMoveTime = time
-        moves.append(MoveEvent(keyCode: keyCode, isDown: isDown, delay: delay))
+        history.append(MoveEvent(keyCode: keyCode, isDown: isDown, delay: delay))
+        historyDuration += delay
+        trimHistory()
         if isDown { heldKeys.insert(keyCode) } else { heldKeys.remove(keyCode) }
         rebuildPath()
         if popover.isShown { refreshUI() }
     }
 
+    // Cap the rolling history; the marked section and mark-in-progress shift with it.
+    func trimHistory() {
+        while historyDuration > historyCap && history.count > 1 {
+            historyDuration -= history.removeFirst().delay
+            selStart -= 1; selEnd -= 1
+            markStartIdx = max(markStartIdx - 1, 0)
+            if selStart < 0 || selEnd < 0 { selStart = -1; selEnd = -1 }
+        }
+    }
+
     // MARK: - Replay
 
     func toggleReplay() {
-        if isRecordingPath { return }
+        if isMarking { return }
         if isReplaying {
             replayLock.lock(); replayCancelled = true; replayLock.unlock()
             return
@@ -788,7 +970,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         var events = moves
         if closeLoop {
-            let (_, end) = integrate(moves)
+            let (_, end, _) = integrate(moves)
             // Reposition from the recorded end point back to the start FIRST, then run the
             // loop — so replay always traces the original path from the original start point,
             // repeating without drift even when the recording doesn't end where it began.
